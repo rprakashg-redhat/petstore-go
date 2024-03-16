@@ -1,0 +1,16 @@
+kind: Service
+apiVersion: v1
+metadata:
+  name: petstore-go-service
+  labels:
+    app: petstore-go
+    app.kubernetes.io/component: backstage
+    backstage.io/kubernetes-id: petstore-go
+spec:
+  ports:
+    - name: http-8080
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+  selector:
+    app: petstore-go

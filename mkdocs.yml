@@ -1,0 +1,8 @@
+site_name: petstore-go
+site_description: Petstore backend microservice
+
+nav:
+  - Introduction: index.md
+
+plugins:
+  - techdocs-core

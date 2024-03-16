@@ -1,0 +1,27 @@
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: petstore-go-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: petstore-go
+  template:
+    metadata:
+      labels:
+        app: petstore-go
+        app.kubernetes.io/component: backstage
+        backstage.io/kubernetes-id: petstore-go
+    spec:
+      containers:
+        - name: petstore-go
+          image: ghcr.io/rprakashg-redhat/petstore-go:latest
+          ports:
+            - name: http-8080
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            limits:
+              memory: '128Mi'
+              cpu: '500m'

@@ -1,0 +1,21 @@
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: petstore-go-ingress
+  labels:
+    app: petstore-go
+    app.kubernetes.io/component: backstage
+    backstage.io/kubernetes-id: petstore-go
+spec:
+  ingressClassName: haproxy
+  - host: apps.sandbox2841.opentlc.com
+    http:
+      paths:
+        - path: /
+          pathType: Prefix
+          backend:
+            service:
+              name: petstore-go
+              port:
+                number: 8080

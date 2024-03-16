@@ -1,0 +1,161 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "source"
+  workflow_dispatch:
+    
+env:
+  IMAGE_TAGS: ${{ github.sha }}
+  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+  REGISTRY_USER: ${{ github.actor }}
+  REGISTRY_PASSWORD: ${{ github.token }}
+
+jobs:
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: sonarsource/sonarqube-scan-action@master
+      with:
+        projectBaseDir: source
+        args: >
+          -Dsonar.verbose=true
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  #Build and push container image to registry
+  build-and-push-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: get repo name
+      run: echo "REPO_NAME=$(basename ${{ github.repository }})" >> $GITHUB_ENV
+    - name: build image
+      id: build-image
+      uses: redhat-actions/buildah-build@v2
+      with:
+        image: ${{ env.REPO_NAME }} 
+        tags: ${{ env.IMAGE_TAGS }}
+        context: source
+        containerfiles: |
+          source/cmd/server/Dockerfile
+    - name: Log in to Quay.io
+      uses: redhat-actions/podman-login@v1
+      with:
+        username: ${{ env.REGISTRY_USER }}
+        password: ${{ env.REGISTRY_PASSWORD }}
+        registry: ${{ env.IMAGE_REGISTRY }}
+    - name: push image to registry
+      id: push-to-registry
+      uses: redhat-actions/push-to-registry@v2
+      with:
+        image: ${{ steps.build-image.outputs.image }}
+        tags: ${{ steps.build-image.outputs.tags }}
+        registry: ${{ env.IMAGE_REGISTRY }}
+        username: ${{ env.REGISTRY_USER }}
+        password: ${{ env.REGISTRY_PASSWORD }}
+        extra-args: |
+          --disable-content-trust
+    outputs:
+      newImage: ${{ env.IMAGE_REGISTRY }}/${{ steps.build-image.outputs.image }}@${{ steps.push-to-registry.outputs.digest }}
+    needs:
+    - static-analysis
+
+  # Sign the container image
+  sign-image:
+    runs-on: ubuntu-latest
+    steps:
+    - name: sign-image
+      uses: rprakashg-redhat/sign-image@main
+      with:
+          image: ${{ needs.build-and-push-image.outputs.newImage }}
+          registry: ${{ env.IMAGE_REGISTRY }}
+          user: ${{ env.REGISTRY_USER }}
+          password: ${{ env.REGISTRY_PASSWORD }}
+          cosign-key: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          cosign-key-password: ${{ secrets.COSIGN_PASSWORD }}
+    needs:
+    - build-and-push-image
+    outputs:
+      newImage: ${{ needs.build-and-push-image.outputs.newImage }}
+
+  # Run container vulnerability scanning and policy check on the image
+  rhacs-checks:
+    runs-on: ubuntu-latest
+    steps:
+    - id: setup-roxctl
+      uses: rprakashg-redhat/setup-roxctl@main
+    - name: run image check
+      uses: rprakashg-redhat/acs-image-check@main
+      with:
+        image: ${{ needs.sign-image.outputs.newImage }}
+        api-token: ${{ secrets.ROX_API_TOKEN }}
+        central: ${{ secrets.ROX_CENTRAL }}
+        output: table
+        output-path: ${{ runner.temp }}
+    - name: run image scan
+      uses: rprakashg-redhat/acs-image-scan@main
+      with:
+        image: ${{ needs.sign-image.outputs.newImage }}
+        api-token: ${{ secrets.ROX_API_TOKEN }}
+        central: ${{ secrets.ROX_CENTRAL }}
+        output: json
+        output-path: ${{ runner.temp }}
+    needs:
+    - sign-image
+    outputs:
+      newImage: ${{ needs.sign-image.outputs.newImage }}
+
+  #update deployment manifests
+  update-deployment-manifests:
+    name: update deployment artifacts
+    runs-on: ubuntu-latest
+    steps:
+    - name: setup git
+      run: |
+        # Setting up the git config.
+        git config --global user.email "rgopinat@redhat.com" # HARD CODING FOR NOW, NEED TO DETERMINE HOW TO RETRIEVE THIS FROM CURRENT USER CONTEXT
+        git config --global user.name ${{ github.actor }}
+    - name: create branch
+      run: |
+        git checkout -b "${{ github.job }}-${{ github.sha }}"
+    - name: update deployment manifests
+      working-directory: deploy/k8s
+      run: |
+        IMAGE=\"${{ needs.rhacs-checks.outputs.newImage }}\"
+        sed -i "s#\(.*value:\s*\).*#\1 ${IMAGE}#" overlays/dev/kustomization.yaml
+    - name: commit changes to upstream
+      run: |
+        git add .
+        git commit -m "updated deployment manifests to deploy new versions of image"
+        git push origin "${{ github.job }}-${{ github.sha }}"
+    needs:
+    - rhacs-checks
+    outputs:
+      prBranch: "${{ github.job }}-${{ github.sha }}"
+
+  #Open PullRequest to trigger ArgoCD sync
+  open-pr:
+    name: Open pull request
+    runs-on: ubuntu-latest
+    steps:
+    - name: setup git
+      run: |
+        # Setting up the git config.
+        git config --global user.email "rgopinat@redhat.com" # HARD CODING FOR NOW, NEED TO DETERMINE HOW TO RETRIEVE THIS FROM CURRENT USER CONTEXT
+        git config --global user.name ${{ github.actor }}
+    - name: create PR
+      run: |
+        gh pr create --body "PR for commit - ${{ github.sha }} by {{ github.actor }}" --title "PR for commit - ${{ github.sha }}" --base main --head ${{ needs.update-deployment-manifests.outputs.prBranch }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+    needs:
+    - update-deployment-manifests
